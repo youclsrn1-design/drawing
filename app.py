@@ -1,5 +1,5 @@
 """
-그림책 사진관 — 사진을 손그림 화풍으로 바꾸는 도구 (오프라인 필터 전용)
+그림책 사진관 — 사진을 다양한 손그림 화풍으로 바꾸는 도구 (오프라인 필터 전용)
 
 바깥으로 아무것도 전송하지 않습니다. 업로드한 사진은 앱이 도는 동안 메모리에만 있습니다.
 """
@@ -28,7 +28,7 @@ SIZE_PRESETS = {
     "직접 입력": "custom",
 }
 
-# smooth, levels, line, saturation, warmth, bloom
+# 기존 그림책 느낌 프리셋: smooth, levels, line, saturation, warmth, bloom
 LOOKS = {
     "그림책 느낌": (3, 64, 0.55, 1.15, 0.35, 0.15),
     "은은하게 (원본 살림)": (2, 64, 0.30, 1.08, 0.20, 0.10),
@@ -36,6 +36,13 @@ LOOKS = {
     "포근한 수채": (4, 64, 0.25, 1.00, 0.60, 0.35),
     "직접 조절": None,
 }
+
+FILTER_TYPES = [
+    "📖 그림책 (세밀 조절)", 
+    "✏️ 흑백 연필 스케치", 
+    "🖍️ 만화책 (카툰)", 
+    "🖌️ 수채화 (자동)"
+]
 
 PREVIEW_EDGE = 720  # 미리보기는 작게 돌려서 슬라이더 반응을 빠르게 유지
 
@@ -47,8 +54,7 @@ class Result:
     after: Image.Image
 
 
-# ----------------------------------------------------------------------------- 이미지 처리
-
+# ----------------------------------------------------------------------------- 이미지 처리 (공통)
 
 def resize_long_edge(img: Image.Image, long_edge: int | None) -> Image.Image:
     """긴 변을 기준으로 비율을 유지하며 크기를 맞춥니다."""
@@ -61,6 +67,9 @@ def resize_long_edge(img: Image.Image, long_edge: int | None) -> Image.Image:
     return img.resize((max(1, round(w * s)), max(1, round(h * s))), Image.LANCZOS)
 
 
+# ----------------------------------------------------------------------------- 필터 함수들
+
+# 1. 기존 그림책 필터 관련
 def _ink_lines(gray: np.ndarray, sigma=1.1, k=1.7, p=22.0, eps=0.09, phi=14.0) -> np.ndarray:
     """가우시안 차이로 잉크선처럼 얇고 매끈한 윤곽을 뽑습니다 (0=검정, 1=흰색)."""
     g1 = cv2.GaussianBlur(gray, (0, 0), sigma)
@@ -68,43 +77,24 @@ def _ink_lines(gray: np.ndarray, sigma=1.1, k=1.7, p=22.0, eps=0.09, phi=14.0) -
     d = ((1 + p) * g1 - p * g2) / 255.0
     return np.clip(np.where(d >= eps, 1.0, 1.0 + np.tanh(phi * (d - eps))), 0, 1)
 
-
-def painterly(
-    img: Image.Image,
-    smooth: int,
-    levels: int,
-    line: float,
-    saturation: float,
-    warmth: float,
-    bloom: float,
-) -> Image.Image:
+def painterly(img: Image.Image, smooth: int, levels: int, line: float, saturation: float, warmth: float, bloom: float) -> Image.Image:
     """색을 평평하게 정리하고 윤곽선과 부드러운 빛을 얹습니다."""
     rgb = np.array(img.convert("RGB"))
 
-    # 1) 색면 정리 — 비슷한 색끼리 뭉쳐 물감으로 칠한 듯한 넓은 면을 만든다
-    flat = cv2.pyrMeanShiftFiltering(
-        rgb, sp=max(4, smooth * 5), sr=max(10, smooth * 14), maxLevel=1
-    )
+    flat = cv2.pyrMeanShiftFiltering(rgb, sp=max(4, smooth * 5), sr=max(10, smooth * 14), maxLevel=1)
     flat = cv2.bilateralFilter(flat, 9, 45, 9)
 
-    # 2) 색 단계 줄이기 — 낮출수록 포스터처럼 색이 뭉친다
     if levels < 56:
-        q = Image.fromarray(flat).quantize(
-            colors=int(levels), method=Image.MEDIANCUT, dither=Image.Dither.NONE
-        )
+        q = Image.fromarray(flat).quantize(colors=int(levels), method=Image.MEDIANCUT, dither=Image.Dither.NONE)
         flat = cv2.bilateralFilter(np.array(q.convert("RGB")), 7, 30, 7)
 
-    # 3) 윤곽선 — 잉크로 그은 듯 얇고 매끈하게
     if line > 0:
-        gray = cv2.bilateralFilter(
-            cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32), 7, 40, 7
-        )
+        gray = cv2.bilateralFilter(cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY).astype(np.float32), 7, 40, 7)
         edge = 1.0 - (1.0 - _ink_lines(gray)) * line
         flat = (flat.astype(np.float32) * edge[..., None]).clip(0, 255).astype(np.uint8)
 
     out = Image.fromarray(flat)
 
-    # 4) 색감
     if saturation != 1.0:
         out = ImageEnhance.Color(out).enhance(saturation)
     if warmth:
@@ -113,7 +103,6 @@ def painterly(
         a[..., 2] = (a[..., 2] - 10 * warmth).clip(0, 255)   # B
         out = Image.fromarray(a.astype(np.uint8))
 
-    # 5) 부드러운 빛 번짐 — 화면 합성으로 햇살을 얹는다
     if bloom:
         b = np.array(out).astype(np.float32) / 255.0
         g = np.array(out.filter(ImageFilter.GaussianBlur(12))).astype(np.float32) / 255.0
@@ -123,10 +112,65 @@ def painterly(
     return out
 
 
+# 2. 흑백 연필 스케치 필터
+def filter_sketch(img: Image.Image, blur_amount: int) -> Image.Image:
+    rgb = np.array(img.convert("RGB"))
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    inv = cv2.bitwise_not(gray)
+    # 홀수 값 유지
+    k_size = blur_amount if blur_amount % 2 == 1 else blur_amount + 1
+    blur = cv2.GaussianBlur(inv, (k_size, k_size), 0)
+    sketch = cv2.divide(gray, 255 - blur, scale=256)
+    return Image.fromarray(cv2.cvtColor(sketch, cv2.COLOR_GRAY2RGB))
+
+
+# 3. 카툰 (만화책) 필터
+def filter_cartoon(img: Image.Image, edge_thickness: int, color_reduction: int) -> Image.Image:
+    rgb = np.array(img.convert("RGB"))
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    gray = cv2.medianBlur(gray, 5)
+    
+    k_size = edge_thickness if edge_thickness % 2 == 1 else edge_thickness + 1
+    edges = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, k_size, 9)
+
+    h, w = rgb.shape[:2]
+    # 처리 속도를 위해 이미지를 줄여서 색상을 단순화
+    small = cv2.resize(rgb, (w//2, h//2))
+    for _ in range(2):
+        small = cv2.bilateralFilter(small, 9, color_reduction, color_reduction)
+    color = cv2.resize(small, (w, h))
+
+    cartoon = cv2.bitwise_and(color, color, mask=edges)
+    return Image.fromarray(cartoon)
+
+
+# 4. 수채화 필터
+def filter_watercolor(img: Image.Image, brush_size: int, detail: float) -> Image.Image:
+    rgb = np.array(img.convert("RGB"))
+    # BGR 포맷이어야 색이 정확하게 나오므로 변환 후 적용
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    res_bgr = cv2.stylization(bgr, sigma_s=brush_size, sigma_r=detail)
+    res_rgb = cv2.cvtColor(res_bgr, cv2.COLOR_BGR2RGB)
+    return Image.fromarray(res_rgb)
+
+
+# --- 공통 필터 적용 라우터
+def apply_filter(img: Image.Image, filter_type: str, params: tuple) -> Image.Image:
+    if filter_type == FILTER_TYPES[0]: # 그림책
+        return painterly(img, *params)
+    elif filter_type == FILTER_TYPES[1]: # 스케치
+        return filter_sketch(img, *params)
+    elif filter_type == FILTER_TYPES[2]: # 카툰
+        return filter_cartoon(img, *params)
+    elif filter_type == FILTER_TYPES[3]: # 수채화
+        return filter_watercolor(img, *params)
+    return img
+
+
 @st.cache_data(show_spinner=False, max_entries=8)
-def preview(png: bytes, params: tuple) -> Image.Image:
+def preview(png: bytes, filter_type: str, params: tuple) -> Image.Image:
     """같은 사진·같은 설정이면 다시 계산하지 않습니다."""
-    return painterly(Image.open(io.BytesIO(png)), *params)
+    return apply_filter(Image.open(io.BytesIO(png)), filter_type, params)
 
 
 def to_bytes(img: Image.Image, fmt: str, quality: int) -> bytes:
@@ -150,26 +194,42 @@ def build_zip(results: list[Result], fmt: str, quality: int) -> bytes:
 # ----------------------------------------------------------------------------- 사이드바
 
 st.sidebar.title("🌾 그림책 사진관")
-st.sidebar.caption("사진을 손그림 화풍으로 바꿔 책에 넣습니다")
+st.sidebar.caption("원하는 화풍을 선택하고 책에 넣을 사진을 만드세요")
 
-st.sidebar.markdown("**화풍**")
-look = st.sidebar.selectbox("고르기", list(LOOKS), label_visibility="collapsed")
-base = LOOKS[look] or LOOKS["그림책 느낌"]
+st.sidebar.markdown("**🎨 필터 선택**")
+filter_type = st.sidebar.selectbox("화풍 모드", FILTER_TYPES, label_visibility="collapsed")
+st.sidebar.divider()
 
-# 프리셋을 바꾸면 슬라이더 key가 바뀌어 새 기본값으로 다시 그려집니다
-k = look
-smooth = st.sidebar.slider("색면 정리", 1, 5, base[0], key=f"{k}-sm",
-                           help="클수록 사진 질감이 사라지고 그림에 가까워집니다")
-levels = st.sidebar.slider("색 단계", 8, 64, base[1], key=f"{k}-lv",
-                           help="56 이상이면 원래 색을 그대로 씁니다. 낮출수록 색이 뭉쳐 포스터처럼 됩니다")
-line = st.sidebar.slider("윤곽선", 0.0, 1.0, base[2], 0.05, key=f"{k}-ln")
-saturation = st.sidebar.slider("채도", 0.6, 1.8, base[3], 0.02, key=f"{k}-sa")
-warmth = st.sidebar.slider("따뜻함", -1.0, 1.5, base[4], 0.05, key=f"{k}-wa")
-bloom = st.sidebar.slider("빛 번짐", 0.0, 0.6, base[5], 0.02, key=f"{k}-bl")
-params = (smooth, levels, line, saturation, warmth, bloom)
+st.sidebar.markdown(f"**⚙️ {filter_type.split(' ')[1]} 설정**")
+if filter_type == FILTER_TYPES[0]:  # 그림책
+    look = st.sidebar.selectbox("프리셋 고르기", list(LOOKS))
+    base = LOOKS[look] or LOOKS["그림책 느낌"]
+    k = look
+    smooth = st.sidebar.slider("색면 정리", 1, 5, base[0], key=f"{k}-sm")
+    levels = st.sidebar.slider("색 단계", 8, 64, base[1], key=f"{k}-lv")
+    line = st.sidebar.slider("윤곽선", 0.0, 1.0, base[2], 0.05, key=f"{k}-ln")
+    saturation = st.sidebar.slider("채도", 0.6, 1.8, base[3], 0.02, key=f"{k}-sa")
+    warmth = st.sidebar.slider("따뜻함", -1.0, 1.5, base[4], 0.05, key=f"{k}-wa")
+    bloom = st.sidebar.slider("빛 번짐", 0.0, 0.6, base[5], 0.02, key=f"{k}-bl")
+    params = (smooth, levels, line, saturation, warmth, bloom)
+
+elif filter_type == FILTER_TYPES[1]:  # 스케치
+    blur_amount = st.sidebar.slider("선명도 (낮을수록 선명)", 5, 51, 21, step=2, help="값이 클수록 연필 선이 부드러워지고 퍼집니다.")
+    params = (blur_amount, )
+
+elif filter_type == FILTER_TYPES[2]:  # 카툰
+    edge_thickness = st.sidebar.slider("검은 윤곽선 굵기", 3, 15, 9, step=2, help="홀수만 가능하며 클수록 선이 두꺼워집니다.")
+    color_reduction = st.sidebar.slider("색상 단순화(수채화 느낌 부여)", 10, 150, 70, step=10, help="값이 클수록 색이 뭉개져 만화 느낌이 강해집니다.")
+    params = (edge_thickness, color_reduction)
+
+elif filter_type == FILTER_TYPES[3]:  # 수채화
+    brush_size = st.sidebar.slider("붓터치 크기", 10, 100, 60, step=5, help="수채화 물감이 번지는 정도를 설정합니다.")
+    detail = st.sidebar.slider("디테일(질감)", 0.1, 1.0, 0.5, step=0.1, help="종이와 물감의 질감을 살립니다.")
+    params = (brush_size, detail)
+
 
 st.sidebar.divider()
-st.sidebar.markdown("**저장 크기**")
+st.sidebar.markdown("**💾 저장 크기**")
 size_name = st.sidebar.selectbox("크기", list(SIZE_PRESETS), index=2)
 choice = SIZE_PRESETS[size_name]
 if choice == "custom":
@@ -177,7 +237,7 @@ if choice == "custom":
 else:
     long_edge = choice
     if long_edge:
-        st.sidebar.caption(f"긴 변 {long_edge}px, 가로세로 비율은 그대로 둡니다")
+        st.sidebar.caption(f"긴 변 {long_edge}px, 비율 유지")
 
 fmt = st.sidebar.radio("파일 형식", ["JPEG", "PNG"], horizontal=True)
 quality = st.sidebar.slider("JPEG 품질", 70, 100, 95) if fmt == "JPEG" else 95
@@ -185,7 +245,7 @@ quality = st.sidebar.slider("JPEG 품질", 70, 100, 95) if fmt == "JPEG" else 95
 # ----------------------------------------------------------------------------- 본문
 
 st.title("사진을 그림으로")
-st.write("사진을 올리면 첫 장으로 미리보기가 뜹니다. 슬라이더로 화풍을 맞춘 뒤 전체를 변환하세요.")
+st.write("다양한 화풍으로 사진을 변경해보세요. 설정값은 미리보기에 즉시 반영됩니다.")
 
 files = st.file_uploader(
     "사진 올리기",
@@ -205,8 +265,8 @@ if files:
         small = resize_long_edge(first, PREVIEW_EDGE)
         buf = io.BytesIO()
         small.save(buf, "PNG")
-        with st.spinner("그리는 중"):
-            shown = preview(buf.getvalue(), params)
+        with st.spinner("그림을 변환하는 중입니다..."):
+            shown = preview(buf.getvalue(), filter_type, params)
         a, b = st.columns(2)
         a.image(small, caption="원본")
         b.image(shown, caption="변환")
@@ -231,9 +291,8 @@ if run:
         bar.progress((i - 1) / len(files), text=f"{f.name} ({i}/{len(files)})")
         try:
             src = Image.open(f).convert("RGB")
-            # 색면 정리는 무거워서 작업용 사본에서 처리한 뒤 목표 크기로 키웁니다
             work = resize_long_edge(src, min(1400, long_edge or 1400))
-            out = resize_long_edge(painterly(work, *params), long_edge)
+            out = resize_long_edge(apply_filter(work, filter_type, params), long_edge)
         except Exception as e:
             st.warning(f"{f.name} 변환 실패 — {e}")
             continue
@@ -267,4 +326,3 @@ if results:
         )
 elif not files:
     st.info("사진을 올리면 여기에 결과가 나타납니다. 여러 장을 한 번에 올려도 됩니다.")
-
